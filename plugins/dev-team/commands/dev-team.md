@@ -1,8 +1,8 @@
 ---
-description: 根据实际需求动态组建开发团队，成员间通过消息自主沟通协调，支持项目前讨论、Codex 多模型视角、成员生命周期管理。适用于需要多角色协作的开发任务。
+description: 根据实际需求动态组建开发团队，成员间通过消息自主沟通协调，支持项目前讨论与成员生命周期管理。适用于需要多角色协作的开发任务。
 argument-hint: [项目/功能描述]
 disable-model-invocation: true
-allowed-tools: TeamCreate, TeamDelete, Agent, SendMessage, TaskCreate, TaskUpdate, TaskList, TaskGet, Read, Write, Edit, Glob, Grep, Bash
+allowed-tools: TeamCreate, TeamDelete, Agent, SendMessage, TaskCreate, TaskUpdate, TaskList, TaskGet, ToolSearch, Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # Dev Team - 智能开发团队协作系统
@@ -19,7 +19,48 @@ allowed-tools: TeamCreate, TeamDelete, Agent, SendMessage, TaskCreate, TaskUpdat
 1. **动态组队**：不要套用固定模板。分析实际需求后决定需要哪些角色、多少人。一个纯前端任务不需要后端开发者，一个 CLI 工具不需要 UX 测试者。
 2. **生命周期管理**：区分长期成员和临时成员，及时清理不再需要的成员。
 3. **沟通驱动**：成员间应频繁通过 SendMessage 交换信息，而不是各自孤立工作。
-4. **多模型视角**：关键决策点可引入 Codex 线程获取不同模型的观点。
+
+---
+
+## 工具与权限（必读）
+
+dev-team 的核心机制依赖几组工具，**权限边界**和**调用前置条件**必须先理清，否则成员启动后会卡在第一次工具调用上。
+
+### Team Lead 独占
+仅 Team Lead 可调用，子 agent 工具集中不会出现：
+- `TeamCreate` / `TeamDelete` —— 创建/销毁团队
+- `Agent` —— 启动新成员；子 agent 不能再启动孙 agent（设计如此）
+
+### 全员共享
+Team Lead 与所有子 agent 都可用：
+- `SendMessage` —— 成员间消息（点对点 / 广播）
+- `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` —— 任务协作
+- `Read` / `Write` / `Edit` / `Bash` / `Glob` / `Grep` —— 标准文件与执行
+- `ToolSearch` —— 加载 deferred 工具 schema
+
+### Deferred 工具：首次使用前必须 ToolSearch
+
+`SendMessage` 和 `Task*` 在新启动的 agent 上是 **deferred** 状态——工具名可见但 schema 未载入，直接调用会报 `InputValidationError`。每个 agent（包括 Team Lead 自己）首次使用前必须先：
+
+```
+ToolSearch({
+  query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet",
+  max_results: 10
+})
+```
+
+之后这些工具才能正常调用。这一步必须写进每个成员的 prompt（见下方"成员通用 Prompt 模板"）。
+
+### 子 agent 必须用 `general-purpose`
+
+```
+Agent({
+  subagent_type: "general-purpose",   // 必须！其他类型（claude-code-guide / statusline-setup 等）连 SendMessage 都没有，协作机制会崩
+  ...
+})
+```
+
+`general-purpose` 默认带 `SendMessage` / `Task*` 等共享工具（仍是 deferred 状态，需 ToolSearch）；它没有 `Team*` / `Agent`——这就是为什么子 agent 不能创建团队或启动新成员。
 
 ---
 
@@ -72,9 +113,11 @@ TeamCreate({
 - 暴露潜在风险和分歧
 - 建立成员间的协作默契
 
+> **前置条件**：Team Lead 自己在首次使用 SendMessage 前也要先 ToolSearch 加载 schema（见"工具与权限"）。
+
 #### 讨论流程
 
-1. 先启动需要参与讨论的核心成员（通常是架构相关的角色）
+1. 先启动需要参与讨论的核心成员（通常是架构相关的角色），启动语法见 Phase 4
 2. Team Lead 发送讨论议题广播：
    ```
    SendMessage({
@@ -85,24 +128,6 @@ TeamCreate({
    ```
 3. 成员间自由交流意见（通过 SendMessage 互相讨论）
 4. 有分歧时，成员应主动表达不同意见并说明理由
-
-#### 引入 Codex 多模型视角
-
-在关键技术决策点，使用 Codex 获取不同模型的观点：
-
-```
-Agent({
-  subagent_type: "codex:codex-rescue",
-  description: "技术方案评审",
-  prompt: "我们的团队正在讨论 [具体技术问题]。\n\n方案 A：[描述]\n方案 B：[描述]\n\n项目背景：[背景]\n\n请从不同角度分析这些方案的优劣，给出你的推荐和理由。"
-})
-```
-
-适合引入 Codex 的场景：
-- 架构方案选择存在多个可行路径
-- 团队成员对某个技术实现有分歧
-- 需要评估某个方案的风险
-- 复杂算法或数据结构的选择
 
 讨论结束后，Team Lead 总结决策并广播：
 ```
@@ -122,12 +147,27 @@ SendMessage({
 
 ### Phase 4: 启动全部成员并行工作
 
-启动所有已规划的成员，每个成员 prompt 中包含：
+为每个规划好的成员调用 `Agent`：
+
+```
+Agent({
+  subagent_type: "general-purpose",   // 必须；见"工具与权限"
+  name: "成员名（团队内唯一）",
+  team_name: "[实际团队名]",          // 加入到 Phase 1 创建的团队
+  description: "[角色简介，3-5 词]",
+  prompt: "[完整成员 prompt，见下方'成员通用 Prompt 模板']"
+})
+```
+
+每个成员的 prompt 必须包含：
 - 角色定义和职责
-- 团队沟通协议（见下文）
+- ToolSearch 加载步骤（必须放在工作流程的第 0 步）
+- 团队沟通协议（见下方）
 - 生命周期类型（persistent / ephemeral）
 - 需要载入的增强 skill（如有）
 - 当前项目任务描述
+
+**并行启动**：多个成员可在同一回合通过多个 `Agent` 调用并行启动。
 
 ### Phase 5: 协调与动态管理
 
@@ -179,7 +219,8 @@ SendMessage({
 [载入特定 skill 的指令，例如前端开发者载入 frontend-design]
 
 ## 工作流程
-1. 读取团队配置 `~/.claude/teams/[实际团队名]/config.json` 了解团队成员
+0. **首次启动必做**：调用 `ToolSearch({ query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet", max_results: 10 })` 加载 deferred 工具的 schema，否则后续 SendMessage / Task* 调用会报 `InputValidationError`。
+1. 读取团队配置 `~/.claude/teams/[实际团队名]/config.json` 了解团队成员（如配置不存在，可通过收到的广播和点对点消息自然了解成员名单）
 2. 使用 TaskList 查看任务，认领属于你的任务
 3. [具体工作步骤]
 4. 完成后通知相关成员并检查下一个任务
@@ -290,7 +331,6 @@ SendMessage({
 ### 讨论与决策
 - 任何影响多个成员的技术决策应先讨论再执行
 - 讨论中鼓励不同意见，Team Lead 在必要时做最终决策
-- 复杂或有争议的决策可引入 Codex（`subagent_type: "codex:codex-rescue"`）获取第三方视角
 
 ---
 
@@ -336,7 +376,7 @@ Phase 0: 需求分析
     │
 Phase 1: 创建团队
     │
-Phase 2: 项目前讨论 ◄──── Codex 多模型视角（可选）
+Phase 2: 项目前讨论
     │        │
     │    成员间自由讨论
     │    交换意见和方案
