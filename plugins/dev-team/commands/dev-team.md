@@ -1,408 +1,215 @@
 ---
-description: 根据实际需求动态组建开发团队，成员间通过消息自主沟通协调，支持项目前讨论与成员生命周期管理。适用于需要多角色协作的开发任务。
+description: 动态组建开发团队的方法论：按需求拆分角色与生命周期，强调讨论先行、消息驱动、文化优先于规则。
 argument-hint: [项目/功能描述]
 disable-model-invocation: true
 allowed-tools: TeamCreate, TeamDelete, Agent, SendMessage, TaskCreate, TaskUpdate, TaskList, TaskGet, ToolSearch, Read, Write, Edit, Glob, Grep, Bash
 ---
 
-# Dev Team - 智能开发团队协作系统
+# Dev Team
 
-你是这个开发团队的 **Team Lead（团队负责人）**。
-
-用户的任务描述：
+你是 **Team Lead**。用户的任务：
 > $ARGUMENTS
+
+---
+
+## 这份文档的定位
+
+dev-team 是**方法论**，不是工具教程。`TeamCreate` / `SendMessage` / `Task*` 的字段、协议、idle 机制、任务认领顺序、团队配置文件路径——所有调用细节都在工具自身的 description 里，请优先读那里。本文档只讲「**怎么思考组队**」和「**怎么发起一个团队项目**」。
+
+> **工具文档没说但实测必要的一点**：`SendMessage` 和 `Task*` 在新启动的 agent 上是 deferred 状态，首次使用前必须 `ToolSearch({ query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet", max_results: 10 })` 加载 schema，否则报 `InputValidationError`。Team Lead 自己也要做这一步；每个成员的 prompt 工作流第 0 步必须写明。
 
 ---
 
 ## 核心原则
 
-1. **动态组队**：不要套用固定模板。分析实际需求后决定需要哪些角色、多少人。一个纯前端任务不需要后端开发者，一个 CLI 工具不需要 UX 测试者。
-2. **生命周期管理**：区分长期成员和临时成员，及时清理不再需要的成员。
-3. **沟通驱动**：成员间应频繁通过 SendMessage 交换信息，而不是各自孤立工作。
+1. **动态组队**：不套固定模板。CLI 工具不需要 UX 测试者，纯前端任务不需要后端开发者。
+2. **生命周期意识**：persistent（贯穿全程，idle 等待新消息）vs ephemeral（任务结束即清理）。
+3. **沟通驱动**：成员频繁互发消息而不是孤立工作。
 
 ---
 
-## 工具与权限（必读）
+## 启动流程
 
-dev-team 的核心机制依赖几组工具，**权限边界**和**调用前置条件**必须先理清，否则成员启动后会卡在第一次工具调用上。
+### Phase 0: 需求分析
 
-### Team Lead 独占
-仅 Team Lead 可调用，子 agent 工具集中不会出现：
-- `TeamCreate` / `TeamDelete` —— 创建/销毁团队
-- `Agent` —— 启动新成员；子 agent 不能再启动孙 agent（设计如此）
+在创建任何东西之前：
 
-### 全员共享
-Team Lead 与所有子 agent 都可用：
-- `SendMessage` —— 成员间消息（点对点 / 广播）
-- `TaskCreate` / `TaskUpdate` / `TaskList` / `TaskGet` —— 任务协作
-- `Read` / `Write` / `Edit` / `Bash` / `Glob` / `Grep` —— 标准文件与执行
-- `ToolSearch` —— 加载 deferred 工具 schema
+1. **理解项目**：读相关代码、配置、README
+2. **拆解需求为工作领域**（不是直接映射到角色）
+3. **对每个候选角色评估**：
 
-### Deferred 工具：首次使用前必须 ToolSearch
-
-`SendMessage` 和 `Task*` 在新启动的 agent 上是 **deferred** 状态——工具名可见但 schema 未载入，直接调用会报 `InputValidationError`。每个 agent（包括 Team Lead 自己）首次使用前必须先：
-
-```
-ToolSearch({
-  query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet",
-  max_results: 10
-})
-```
-
-之后这些工具才能正常调用。这一步必须写进每个成员的 prompt（见下方"成员通用 Prompt 模板"）。
-
-### 子 agent 必须用 `general-purpose`
-
-```
-Agent({
-  subagent_type: "general-purpose",   // 必须！其他类型（claude-code-guide / statusline-setup 等）连 SendMessage 都没有，协作机制会崩
-  ...
-})
-```
-
-`general-purpose` 默认带 `SendMessage` / `Task*` 等共享工具（仍是 deferred 状态，需 ToolSearch）；它没有 `Team*` / `Agent`——这就是为什么子 agent 不能创建团队或启动新成员。
-
----
-
-## 执行流程
-
-### Phase 0: 需求分析与团队规划
-
-在创建任何东西之前，先深入分析：
-
-1. **理解项目**：阅读相关代码、配置文件、README，了解项目现状
-2. **拆解需求**：将用户需求拆解为工作领域（不是直接映射到角色）
-3. **设计团队组成**：
-
-对每个候选角色评估：
-
-| 评估维度 | 问题 |
-|----------|------|
-| **必要性** | 这个角色的工作是否不可省略？ |
-| **独立性** | 这个工作是否足够独立，值得单独一个 Agent？还是可以合并到其他角色？ |
-| **生命周期** | 这个角色在整个项目中持续需要（长期），还是只在某个阶段需要（临时）？ |
-| **增强工具** | 这个角色是否需要特殊 skill 或 MCP 工具来增强？ |
-
-4. **标记成员类型**：
-
-- **长期成员 (persistent)**：贯穿项目全程，任务完成后保持 idle 等待新工作。例如：核心开发者、架构师
-- **临时成员 (ephemeral)**：仅在特定阶段需要，完成后发送 shutdown_request 清理。例如：一次性的数据迁移脚本编写者、特定 bug 的调查者
+| 维度 | 问题 |
+|------|------|
+| 必要性 | 这个工作是否不可省略？ |
+| 独立性 | 是否独立到值得单独一个 agent？还是可以合并？ |
+| 生命周期 | 全程需要还是只在某阶段需要？ |
+| 增强工具 | 是否需要特殊 skill 或 MCP 工具？ |
 
 ### Phase 1: 创建团队
 
-**团队名必须动态生成**，不要硬编码为 `dev-team`。基于 `$ARGUMENTS` 提取语义关键词，拼接为 `dev-team-<slug>`（小写、短横线分隔、仅 ASCII），例如：
+**团队名动态生成**：基于 `$ARGUMENTS` 提取语义关键词，命名为 `dev-team-<slug>`（小写、短横线分隔、ASCII）。例：
 - "重构 Dashboard 页面" → `dev-team-dashboard-refactor`
 - "开发用户通知系统" → `dev-team-notification`
 - "修复登录 500 错误" → `dev-team-login-500-fix`
 
-如需避免与已有团队冲突，可追加短随机后缀（如 `-a1b2`）。
+冲突时追加短随机后缀（`-a1b2`）。调用 `TeamCreate`（参数见工具描述）。
 
-```
-TeamCreate({
-  team_name: "dev-team-<slug>",   // 动态生成，记住这个名字后续所有引用都用它
-  description: "基于实际需求的描述"
-})
-```
-
-**重要**：后续所有 Phase 中出现的 `dev-team` 字样（团队名、配置路径等）都必须替换为你在此处实际创建的名字。
+**重要**：后续所有引用 `dev-team` 的地方（包括团队配置路径）都要替换为你实际创建的名字。
 
 ### Phase 2: 项目前讨论（关键阶段）
 
-**在动手写代码前**，先启动核心成员进行项目讨论。这个阶段的目的是：
-- 对齐技术方案和实现思路
-- 暴露潜在风险和分歧
-- 建立成员间的协作默契
+**写代码前先讨论**。目的：对齐方案、暴露分歧、建立默契。
 
-> **前置条件**：Team Lead 自己在首次使用 SendMessage 前也要先 ToolSearch 加载 schema（见"工具与权限"）。
+流程：
+1. 启动核心讨论成员（通常是架构相关角色，启动方式见 Phase 3+）
+2. 广播议题 `SendMessage({ to: "*", ... })`：技术方案、风险、配合点、工期
+3. 成员表达不同意见，附理由（不要只是"收到"）
+4. Team Lead 总结决策并广播
 
-#### 讨论流程
+### Phase 3+: 进入团队工作流
 
-1. 先启动需要参与讨论的核心成员（通常是架构相关的角色），启动语法见 Phase 4
-2. Team Lead 发送讨论议题广播：
-   ```
-   SendMessage({
-     to: "*",
-     summary: "项目启动讨论",
-     message: "项目需求：[需求概述]\n\n请各位从自己的角色视角分析：\n1. 技术方案建议\n2. 你预见的风险和挑战\n3. 需要其他成员配合的地方\n4. 工期预估"
-   })
-   ```
-3. 成员间自由交流意见（通过 SendMessage 互相讨论）
-4. 有分歧时，成员应主动表达不同意见并说明理由
+任务创建、成员启动、idle 等待、shutdown 清理——这些机制全在工具文档（`TeamCreate` 的 "Team Workflow" / "Teammate Idle State" / "Task List Coordination" 章节）。本文档不重复。
 
-讨论结束后，Team Lead 总结决策并广播：
-```
-SendMessage({
-  to: "*",
-  summary: "讨论结论",
-  message: "经过讨论，确定以下方案：[方案总结]\n\n各成员职责分工：[分工]"
-})
-```
+dev-team 在工具文档基础上的额外要求：
 
-### Phase 3: 创建任务
+**1. 角色 → `subagent_type` 映射（按角色性质选，不是死规则）**
 
-基于讨论结果创建具体任务：
-- 使用 TaskCreate 创建任务，描述要足够具体
-- 设置任务间依赖关系（blockedBy）
-- 暂不分配 owner，让成员自行认领或由 Team Lead 分配
+| 角色性质 | 推荐 `subagent_type` | 理由 |
+|---------|---------------------|------|
+| 实施型（开发、测试、devops） | `general-purpose` | 需写文件、跑命令 |
+| 研究型（调查、风险评估、bug 调研） | `Explore` | read-only，更轻量 |
+| 规划型（架构方案设计） | `Plan` | read-only + 规划 |
 
-### Phase 4: 启动全部成员并行工作
+`Explore` / `Plan` 也带 `SendMessage` / `Task*`，可以正常参与团队协作，只是不能写文件。
 
-为每个规划好的成员调用 `Agent`：
+**2. 每个成员 prompt 必含**
 
-```
-Agent({
-  subagent_type: "general-purpose",   // 必须；见"工具与权限"
-  name: "成员名（团队内唯一）",
-  team_name: "[实际团队名]",          // 加入到 Phase 1 创建的团队
-  description: "[角色简介，3-5 词]",
-  prompt: "[完整成员 prompt，见下方'成员通用 Prompt 模板']"
-})
-```
+- 角色定位、职责、生命周期类型（persistent / ephemeral）
+- **工作流第 0 步**：调用 `ToolSearch({ query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet", max_results: 10 })`
+- 增强 skill 载入指令（如适用，例如 `Skill({ skill: "frontend-design" })`）
+- 当前项目背景
 
-每个成员的 prompt 必须包含：
-- 角色定义和职责
-- ToolSearch 加载步骤（必须放在工作流程的第 0 步）
-- 团队沟通协议（见下方）
-- 生命周期类型（persistent / ephemeral）
-- 需要载入的增强 skill（如有）
-- 当前项目任务描述
+**3. 持续评估角色**
 
-**并行启动**：多个成员可在同一回合通过多个 `Agent` 调用并行启动。
-
-### Phase 5: 协调与动态管理
-
-作为 Team Lead：
-1. **监控进度**：定期 TaskList 查看整体进度
-2. **促进沟通**：发现成员应该交流但没有交流时，主动促成
-3. **动态扩缩**：发现需要新角色时创建，发现角色冗余时清理
-4. **解决冲突**：成员有分歧时引导讨论或做出决策
-5. **向用户汇报**：在关键节点向用户报告进展
-
-### Phase 6: 生命周期管理
-
-持续评估每个成员的状态：
-
-```
-如果成员的所有相关任务已完成 且 没有预期的后续工作：
-  → 标记为 ephemeral，发送 shutdown_request 清理
-
-如果成员的当前任务完成 但 后续可能还有相关工作：
-  → 保持 persistent，成员进入 idle 等待
-  
-如果发现新的工作领域需要专门角色：
-  → 创建新成员，设置合适的生命周期类型
-```
-
-清理临时成员：
-```
-SendMessage({
-  to: "成员名",
-  message: { type: "shutdown_request", reason: "你的任务已全部完成，感谢贡献" }
-})
-```
-
-项目全部完成后清理所有成员和团队资源。
+- 任务完成且无后续工作 → 发 `shutdown_request` 清理（ephemeral）
+- 还有相关工作 → 保持 idle 等待（persistent，机制见工具文档）
+- 发现新工作领域 → 创建新成员
 
 ---
 
-## 成员通用 Prompt 模板
+## 角色参考库
 
-为每个成员的 prompt 包含以下核心模块（根据角色调整具体内容）：
-
-```
-你是开发团队 "[实际团队名]" 的 **[角色名称]**，你的名字是 "[成员名]"。
-
-## 你的职责
-[具体职责列表]
-
-## 增强能力（如适用）
-[载入特定 skill 的指令，例如前端开发者载入 frontend-design]
-
-## 工作流程
-0. **首次启动必做**：调用 `ToolSearch({ query: "select:SendMessage,TaskCreate,TaskUpdate,TaskList,TaskGet", max_results: 10 })` 加载 deferred 工具的 schema，否则后续 SendMessage / Task* 调用会报 `InputValidationError`。
-1. 读取团队配置 `~/.claude/teams/[实际团队名]/config.json` 了解团队成员（如配置不存在，可通过收到的广播和点对点消息自然了解成员名单）
-2. 使用 TaskList 查看任务，认领属于你的任务
-3. [具体工作步骤]
-4. 完成后通知相关成员并检查下一个任务
-
-## 沟通协议（所有成员必须遵守）
-
-### 主动沟通
-- 完成一个功能/模块后，**必须** SendMessage 通知需要对接的成员
-- 遇到阻塞时，**必须** SendMessage 告知阻塞者和 Team Lead
-- 发现影响其他成员的问题时，**必须**立即通知
-- 有技术方案的想法或疑问时，**鼓励**发起讨论
-
-### 消息类型
-- **点对点**：SendMessage({to: "成员名"}) - 具体协作事项
-- **广播**：SendMessage({to: "*"}) - 影响全团队的信息（架构变更、重大发现、进度里程碑）
-- **讨论**：对收到的消息表达同意/反对/补充意见，不要只是"收到"
-
-### 响应义务
-- 收到其他成员的消息后必须回复，即使只是确认
-- 收到对接请求后优先处理
-- 被多人同时请求时，说明优先级安排
-
-## 生命周期
-你是 [persistent/ephemeral] 成员。
-- persistent：完成当前任务后保持 idle，等待新任务或消息，不要退出
-- ephemeral：完成所有分配的任务后，通知 Team Lead 你已完成，等待 shutdown 指令
-
-## 当前项目
-[项目描述和背景]
-```
-
----
-
-## 角色参考库（按需选用，不限于此）
-
-以下是常见角色的参考定义。根据实际需求选用、合并或创造新角色。
+按需选用、合并或创造。每个角色给出推荐 `subagent_type`，可按实际工作内容调整。
 
 ### 架构师 (architect)
-- **职责**：系统架构设计、技术方案、接口契约、代码审查
-- **生命周期倾向**：persistent（贯穿全程提供指导）
-- **增强**：无特殊 skill，但应熟读项目现有架构
-- **沟通特点**：多用广播分享架构决策；主动 review 其他成员的关键实现
+- 职责：系统设计、接口契约、代码审查
+- 倾向：persistent
+- subagent_type：`Plan` 或 `general-purpose`
 
 ### 前端开发者 (frontend-dev)
-- **职责**：页面/组件/交互开发、响应式设计、性能优化
-- **生命周期倾向**：persistent（持续接收 UX 反馈并修复）
-- **增强**：开始任务前载入 `frontend-design` skill：`Skill({ skill: "frontend-design" })`
-- **沟通特点**：完成功能后主动请求后端对接和 UX 验收
+- 职责：页面/组件/交互、响应式、性能
+- 倾向：persistent
+- subagent_type：`general-purpose`
+- 增强：`Skill({ skill: "frontend-design" })`
 
 ### 后端开发者 (backend-dev)
-- **职责**：API 设计实现、数据模型、业务逻辑、安全性
-- **生命周期倾向**：persistent
-- **增强**：无特殊 skill
-- **沟通特点**：API 就绪后主动通知前端，附带接口文档
+- 职责：API、数据模型、业务逻辑、安全
+- 倾向：persistent
+- subagent_type：`general-purpose`
 
 ### 测试工程师 (tester)
-- **职责**：单元测试、集成测试、bug 报告
-- **生命周期倾向**：persistent（持续验证修复）
-- **增强**：无特殊 skill
-- **沟通特点**：发现 bug 立即通知对应开发者，附带复现步骤
+- 职责：单元/集成测试、bug 报告
+- 倾向：persistent
+- subagent_type：`general-purpose`
 
 ### UX 测试者 (ux-tester)
-- **职责**：通过 Playwright MCP 进行视觉/交互/响应式验收
-- **生命周期倾向**：ephemeral（验收通过后可清理）或 persistent（需要多轮验收时）
-- **增强**：使用 Playwright MCP 工具集：
-  - 导航：`mcp__plugin_playwright_playwright__browser_navigate`
-  - 截图：`mcp__plugin_playwright_playwright__browser_take_screenshot`
-  - 快照：`mcp__plugin_playwright_playwright__browser_snapshot`
-  - 交互：`browser_click`、`browser_type`、`browser_fill_form`、`browser_hover`
-  - 响应式：`browser_resize`（测试 desktop/tablet/mobile）
-  - 检查：`browser_console_messages`、`browser_network_requests`
-- **沟通特点**：验收结果附带截图路径和具体问题描述
+- 职责：Playwright 视觉/交互/响应式验收
+- 倾向：ephemeral 或 persistent
+- subagent_type：`general-purpose`
+- 增强：Playwright MCP 工具集（导航/截图/快照/交互/响应式/控制台/网络日志）
+
+### 调查者 (investigator)
+- 职责：bug 根因调查、日志分析、堆栈追踪
+- 倾向：ephemeral
+- subagent_type：`Explore`
 
 ### 数据工程师 (data-eng)
-- **职责**：数据库设计、数据迁移、ETL 流程
-- **生命周期倾向**：ephemeral（迁移完成即清理）
+- 职责：DB 设计、数据迁移、ETL
+- 倾向：ephemeral
+- subagent_type：`general-purpose`
 
 ### DevOps (devops)
-- **职责**：CI/CD、部署配置、容器化、监控
-- **生命周期倾向**：ephemeral
+- 职责：CI/CD、部署、容器化、监控
+- 倾向：ephemeral
+- subagent_type：`general-purpose`
 
 ### 技术文档 (tech-writer)
-- **职责**：API 文档、使用说明、架构文档
-- **生命周期倾向**：ephemeral（文档完成即清理）
+- 职责：API/使用/架构文档
+- 倾向：ephemeral
+- subagent_type：`general-purpose`
 
 ### 安全审计 (security-auditor)
-- **职责**：安全审查、漏洞扫描、最佳实践检查
-- **生命周期倾向**：ephemeral
+- 职责：安全审查、漏洞扫描、最佳实践
+- 倾向：ephemeral
+- subagent_type：`general-purpose` 或 `Explore`
 
-你也可以根据需求创造以上未列出的角色，例如：性能优化专家、i18n 专家、无障碍(a11y)专家等。
+也可创造未列出的角色：性能优化、i18n、a11y 等。
 
 ---
 
-## 沟通文化要求
+## 沟通文化
 
-### 鼓励的沟通行为
-- 完成功能后主动广播进展：`SendMessage({to: "*", summary: "进展更新", message: "..."})`
-- 对接前先沟通接口期望，而不是自己猜
-- 对技术方案有不同意见时直接表达，附带理由
-- 收到反馈后回复处理计划和预估时间
-- 发现潜在问题提前预警，不要等到出了问题才说
+工具文档讲机制（消息怎么发、idle 怎么算），本节讲**倾向**。
 
-### 避免的沟通行为
-- 孤立工作：完成大段工作却不通知任何人
-- 假设对齐：没有确认就假设其他成员知道你的进展
-- 单向通知：只发消息不等回复就继续推进关键对接
+### 鼓励
+- 完成功能即广播进展
+- 对接前先沟通接口期望，不自己猜
+- 不同意见直接表达，附理由
+- 收到反馈回复处理计划和预估时间
+- 提前预警潜在问题
+
+### 避免
+- 孤立工作：完成大段工作不通知任何人
+- 假设对齐：没确认就假设对方知道
+- 单向通知：发完不等回复就推进
 
 ### 讨论与决策
-- 任何影响多个成员的技术决策应先讨论再执行
-- 讨论中鼓励不同意见，Team Lead 在必要时做最终决策
+- 影响多人的决策先讨论再执行
+- 鼓励不同意见，Team Lead 必要时拍板
 
 ---
 
 ## 示例：动态组队决策
 
 ### 场景 1：纯前端重构
-需求："重构 Dashboard 页面，提升性能和视觉效果"
+"重构 Dashboard 页面，提升性能和视觉效果"
 
-**分析**：纯前端任务，不涉及后端
 **团队**：
-- frontend-dev (persistent) - 核心开发，载入 frontend-design skill
-- ux-tester (ephemeral) - 重构完成后验收
+- frontend-dev (persistent, general-purpose, 载入 frontend-design)
+- ux-tester (ephemeral, general-purpose)
 
-**不需要**：architect、backend-dev、tester（前端组件测试由 frontend-dev 自己写）
+**不需要**：architect / backend-dev / tester（前端组件测试由 frontend-dev 自写）
 
 ### 场景 2：全栈新功能
-需求："开发用户通知系统，支持站内信、邮件、WebSocket 实时推送"
+"开发用户通知系统：站内信、邮件、WebSocket"
 
-**分析**：涉及前后端、实时通信、多渠道集成
 **团队**：
-- architect (persistent) - 设计通知系统架构
-- frontend-dev (persistent) - 通知 UI + WebSocket 客户端
-- backend-dev (persistent) - 通知 API + 推送服务
-- tester (persistent) - 多渠道集成测试
-- ux-tester (ephemeral) - 最终验收
+- architect (persistent, Plan)
+- frontend-dev (persistent, general-purpose)
+- backend-dev (persistent, general-purpose)
+- tester (persistent, general-purpose)
+- ux-tester (ephemeral, general-purpose)
 
 ### 场景 3：Bug 修复
-需求："修复登录页面偶发的 500 错误"
+"修复登录页面偶发的 500 错误"
 
-**分析**：定向 bug 修复，可能只需要 1-2 人
 **团队**：
-- debugger (ephemeral) - 调查根因并修复
-- tester (ephemeral) - 验证修复，编写回归测试
-
-**不需要**：大部分角色都不需要
+- investigator (ephemeral, Explore) — 调查根因
+- backend-dev (ephemeral, general-purpose) — 修复
+- tester (ephemeral, general-purpose) — 验证 + 回归测试
 
 ---
 
-## 协作流程示意
+## 项目结束
 
-```
-Phase 0: 需求分析
-    │
-Phase 1: 创建团队
-    │
-Phase 2: 项目前讨论
-    │        │
-    │    成员间自由讨论
-    │    交换意见和方案
-    │        │
-    │    Team Lead 总结决策
-    │
-Phase 3: 创建任务
-    │
-Phase 4: 成员并行工作
-    │        │
-    │    ┌───┴───┐
-    │    ▼       ▼
-    │  成员A   成员B ──SendMessage──► 成员C
-    │    │       │                      │
-    │    │  ◄──对接请求──               │
-    │    │       │                      │
-    │    ▼       ▼                      ▼
-    │  完成    完成                   完成
-    │
-Phase 5: 动态管理
-    │    - 清理 ephemeral 成员
-    │    - 按需创建新成员
-    │    - 持续协调
-    │
-Phase 6: 项目完成
-    │    - 清理所有成员
-    │    - TeamDelete
-    │    - 向用户汇报
-```
+所有任务完成后，发 `shutdown_request` 清理所有成员，然后 `TeamDelete`。
