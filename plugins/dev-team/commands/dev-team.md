@@ -1,9 +1,8 @@
 ---
-name: dev-team
 description: 根据实际需求动态组建开发团队，成员间通过消息自主沟通协调，支持项目前讨论、Codex 多模型视角、成员生命周期管理。适用于需要多角色协作的开发任务。
 argument-hint: [项目/功能描述]
 disable-model-invocation: true
-allowed-tools: TeamCreate TeamDelete Agent SendMessage TaskCreate TaskUpdate TaskList TaskGet Read Write Edit Glob Grep Bash
+allowed-tools: TeamCreate, TeamDelete, Agent, SendMessage, TaskCreate, TaskUpdate, TaskList, TaskGet, Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # Dev Team - 智能开发团队协作系统
